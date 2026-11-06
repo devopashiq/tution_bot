@@ -287,7 +287,7 @@ function extractTimeRange(timeText) {
   const match = timeText.match(
     /(\d{1,2}(?:[:.]\d{1,2})?\s*(?:a\.?\s*m\.?|p\.?\s*m\.?)?)\s*(?:-|–|—|\bto\b)\s*(\d{1,2}(?:[:.]\d{1,2})?\s*(?:a\.?\s*m\.?|p\.?\s*m\.?)?)/i,
   );
-  console.log(match)
+
 
   if (!match) return null;
 
@@ -301,12 +301,12 @@ function extractTimeRange(timeText) {
 
   const startPeriod = getPeriod(startText);
   const endPeriod = getPeriod(endText);
-  console.log(startPeriod,endPeriod,"time")
+
 
   const startTimeMinutes = parseTime(startText, startPeriod || endPeriod);
 
   const endTimeMinutes = parseTime(endText, endPeriod || startPeriod);
-  console.log(startTimeMinutes,endTimeMinutes,"minutes")
+ 
 
   if (
     startTimeMinutes === null ||
@@ -574,8 +574,8 @@ async function sendReplies(msg, requirement) {
 // ==================================================
 
 async function processMessage(msg) {
-  if (!msg.fromMe) return;
-  // if (!groups.has(msg.from)) return;
+  if (msg.fromMe) return;
+  if (!groups.has(msg.from)) return;
 
 
   const id = idOf(msg.id);
@@ -598,7 +598,7 @@ async function processMessage(msg) {
 
   const requirement = parseRequirement(text);
  
-nst result = matchesPreferences(requirement, text);
+result = matchesPreferences(requirement, text);
 
   console.log("\nIncoming tuition broadcast:");
   console.log(JSON.stringify(requirement, null, 2));
@@ -627,7 +627,7 @@ nst result = matchesPreferences(requirement, text);
 // 14. REGISTER MESSAGE HANDLER
 // ==================================================
 
-client.on("message_create", async (msg) => {
+client.on("message", async (msg) => {
   try {
     await processMessage(msg);
   } catch (error) {
