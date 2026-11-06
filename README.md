@@ -37,7 +37,7 @@ WhatsApp Group Message
 1. The bot watches the WhatsApp groups you configured.
 2. Every incoming message is checked against a **keyword filter** (e.g. "tuition", "student", "required").
 3. Matching messages are **parsed** to extract: student name, class, subject, time, and days.
-4. The parsed data is compared against **your preferences** (subject, earliest start time, minimum grade, available days).
+4. The parsed data is compared against **your preferences** (subject, class time window, minimum grade, available days).
 5. If everything matches, the bot automatically **sends a reply** (DM to the poster, group message, or both).
 6. You can optionally receive a **self-notification** with the matched vacancy details.
 
@@ -133,7 +133,7 @@ The dashboard has 4 tabs:
 - **Reply Messages** — customize what the bot says
 - **Toggles** — enable/disable auto reply, self-notify, keyword filter
 - **Keywords** — list of words a message must contain to be processed
-- **Match Preferences** — subjects, minimum class grade, earliest start time, available days
+- **Match Preferences** — subjects, minimum class grade, multiple class time windows, available days
 - Click **Save Configuration** — settings are written to `config.js` immediately
 
 ---
@@ -376,8 +376,19 @@ nssm start TuitionBot
 | `ENABLE_AUTO_REPLY` | `boolean` | `false` = dry run (log only, no messages sent) |
 | `SUBJECTS` | `string[]` | Subjects you are willing to teach |
 | `MINIMUM_CLASS` | `number` | Minimum grade level to accept |
-| `EARLIEST_START_MINUTES` | `number` | Earliest session start time in minutes from midnight |
+| `TIME_WINDOWS` | `object[]` | Allowed class time windows, each with `START_MINUTES` and `END_MINUTES` from midnight; an earlier end time means the window crosses midnight |
 | `AVAILABLE_DAYS` | `string[]` | Days you are available |
+
+Example with two allowed time windows (4:30–6:00 PM and 7:00–10:00 PM):
+
+```js
+"TIME_WINDOWS": [
+  { "START_MINUTES": 990, "END_MINUTES": 1080 },
+  { "START_MINUTES": 1140, "END_MINUTES": 1320 }
+]
+```
+
+For an overnight window from 8:00 PM to 9:30 AM the next day, use `{ "START_MINUTES": 1200, "END_MINUTES": 570 }`.
 
 ---
 

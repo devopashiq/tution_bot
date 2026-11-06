@@ -18,12 +18,39 @@ const keywords = (cfg.KEYWORDS || []).map((k) => k.toLowerCase().trim());
 const seen = new Set();
 const MAX_SEEN = 500;
 
-const preferences = {
-  subjects: ["english"],
-  earliestStartMinutes: 19 * 60, // 5:30 PM
-  minimumClass: 8,
-  availableDays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
-};
+function loadPreferences() {
+  // Reload the saved values so dashboard changes affect matching immediately.
+  delete require.cache[require.resolve("./config")];
+  const currentCfg = require("./config");
+  const configuredWindows = Array.isArray(currentCfg.TIME_WINDOWS)
+    ? currentCfg.TIME_WINDOWS
+    : [{
+        START_MINUTES: currentCfg.EARLIEST_START_MINUTES ?? 19 * 60,
+        END_MINUTES: currentCfg.LATEST_END_MINUTES ?? 22 * 60,
+      }];
+
+  return {
+    subjects: Array.isArray(currentCfg.SUBJECTS)
+      ? currentCfg.SUBJECTS.map((subject) => String(subject).trim().toLowerCase())
+      : ["english"],
+    timeWindows: configuredWindows
+      .filter((window) =>
+        Number.isFinite(window?.START_MINUTES) &&
+        Number.isFinite(window?.END_MINUTES) &&
+        window.START_MINUTES >= 0 &&
+        window.END_MINUTES < 24 * 60 &&
+        window.START_MINUTES < window.END_MINUTES,
+      )
+      .map((window) => ({
+        startMinutes: window.START_MINUTES,
+        endMinutes: window.END_MINUTES,
+      })),
+    minimumClass: Number.isFinite(currentCfg.MINIMUM_CLASS) ? currentCfg.MINIMUM_CLASS : 8,
+    availableDays: Array.isArray(currentCfg.AVAILABLE_DAYS)
+      ? currentCfg.AVAILABLE_DAYS.map((day) => String(day).trim().toLowerCase())
+      : ["monday", "tuesday", "wednesday", "thursday", "friday"],
+  };
+}
 
 const WEEKDAYS = [
   "Monday",
@@ -189,7 +216,7 @@ function extractFields(text) {
     days: "days",
   };
 
-  console.log(normalizeMessage(text).split("\n"), "moralizing");
+  
 
   for (const line of normalizeMessage(text).split("\n")) {
     const match = line.match(
@@ -260,6 +287,7 @@ function extractTimeRange(timeText) {
   const match = timeText.match(
     /(\d{1,2}(?:[:.]\d{1,2})?\s*(?:a\.?\s*m\.?|p\.?\s*m\.?)?)\s*(?:-|–|—|\bto\b)\s*(\d{1,2}(?:[:.]\d{1,2})?\s*(?:a\.?\s*m\.?|p\.?\s*m\.?)?)/i,
   );
+  console.log(match)
 
   if (!match) return null;
 
@@ -273,10 +301,12 @@ function extractTimeRange(timeText) {
 
   const startPeriod = getPeriod(startText);
   const endPeriod = getPeriod(endText);
+  console.log(startPeriod,endPeriod,"time")
 
   const startTimeMinutes = parseTime(startText, startPeriod || endPeriod);
 
   const endTimeMinutes = parseTime(endText, endPeriod || startPeriod);
+  console.log(startTimeMinutes,endTimeMinutes,"minutes")
 
   if (
     startTimeMinutes === null ||
@@ -327,7 +357,7 @@ function parseRequirement(text) {
   const fields = extractFields(text);
   const timeRange = extractTimeRange(fields.time);
   const sessionMatch = fields.sessions?.match(/\d+/);
-  console.log(fields, "extracting feild");
+  
   return {
     student: fields.student || null,
     class: fields.class || null,
@@ -361,6 +391,8 @@ function extractGrade(classText) {
 // 9. MATCH YOUR PREFERENCES
 // ==================================================
 function matchesPreferences(requirement, originalText) {
+  const preferences = loadPreferences();
+
   // Rule 1: Reject the excluded communication requirement.
   if (hasExcludedRequirement(originalText)) {
     return {
@@ -369,7 +401,7 @@ function matchesPreferences(requirement, originalText) {
     };
   }
 
-  // Rule 2: English only.
+  // Rule 2: The subject must be configured.
   if (!requirement.subject) {
     return {
       matched: false,
@@ -384,22 +416,28 @@ function matchesPreferences(requirement, originalText) {
     };
   }
 
-  // Rule 3: Must start at or after 5:30 PM.
-  if (requirement.startTimeMinutes === null) {
+  // Rule 3: The full class time must fit inside one configured time window.
+  if (requirement.startTimeMinutes === null || requirement.endTimeMinutes === null) {
     return {
       matched: false,
       reason: "Time missing or ambiguous",
     };
   }
 
-  if (requirement.startTimeMinutes < preferences.earliestStartMinutes) {
+  const fitsTimeWindow = preferences.timeWindows.some(
+    (window) =>
+      requirement.startTimeMinutes >= window.startMinutes &&
+      requirement.endTimeMinutes <= window.endMinutes,
+  );
+
+  if (!fitsTimeWindow) {
     return {
       matched: false,
-      reason: "Starts before 5:30 PM",
+      reason: "Class time is outside configured time windows",
     };
   }
 
-  // Rule 4: Only Monday to Friday.
+  // Rule 4: The class must be on configured available days.
   if (!requirement.days.length) {
     return {
       matched: false,
@@ -408,7 +446,7 @@ function matchesPreferences(requirement, originalText) {
   }
 
   const unavailableDays = requirement.days.filter(
-    (day) => !preferences.availableDays.includes(day),
+    (day) => !preferences.availableDays.includes(day.toLowerCase()),
   );
 
   if (unavailableDays.length > 0) {
@@ -418,7 +456,7 @@ function matchesPreferences(requirement, originalText) {
     };
   }
 
-  // Only accept Class 8.
+  // Rule 5: The class must meet the configured minimum grade.
   if (!requirement.class) {
     return {
       matched: false,
@@ -431,7 +469,7 @@ function matchesPreferences(requirement, originalText) {
   const grade = extractGrade(requirement.class);
 
   if (grade === null || grade < preferences.minimumClass) {
-    return { matched: false, reason: "Class below 8 or missing" };
+    return { matched: false, reason: "Class below configured minimum or missing" };
   }
 
   return {
@@ -536,8 +574,9 @@ async function sendReplies(msg, requirement) {
 // ==================================================
 
 async function processMessage(msg) {
-  if (msg.fromMe) return;
-  if (!groups.has(msg.from)) return;
+  if (!msg.fromMe) return;
+  // if (!groups.has(msg.from)) return;
+
 
   const id = idOf(msg.id);
 
@@ -547,6 +586,7 @@ async function processMessage(msg) {
   }
 
   const text = normalizeMessage(msg.body);
+ 
 
   if (!text) return;
 
@@ -557,7 +597,8 @@ async function processMessage(msg) {
   }
 
   const requirement = parseRequirement(text);
-  const result = matchesPreferences(requirement, text);
+ 
+nst result = matchesPreferences(requirement, text);
 
   console.log("\nIncoming tuition broadcast:");
   console.log(JSON.stringify(requirement, null, 2));
@@ -586,7 +627,7 @@ async function processMessage(msg) {
 // 14. REGISTER MESSAGE HANDLER
 // ==================================================
 
-client.on("message", async (msg) => {
+client.on("message_create", async (msg) => {
   try {
     await processMessage(msg);
   } catch (error) {

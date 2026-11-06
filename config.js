@@ -22,7 +22,12 @@ module.exports = {
     "english"
   ],
   "MINIMUM_CLASS": 8,
-  "EARLIEST_START_MINUTES": 990,
+  "TIME_WINDOWS": [
+    {
+      "START_MINUTES": 990,
+      "END_MINUTES": 1320
+    }
+  ],
   "AVAILABLE_DAYS": [
     "Monday",
     "Tuesday",

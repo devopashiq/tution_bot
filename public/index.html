@@ -314,6 +314,12 @@
 
     .time-row { display: flex; align-items: center; gap: 12px; }
     .time-row span { color: var(--text-dim); font-size: 13px; }
+    .time-window-row { padding: 12px; margin: 0 0 10px; border: 1px solid var(--border); border-radius: 10px; background: rgba(0,0,0,0.12); }
+    .time-window-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; color: var(--text-dim); font-size: 12px; font-weight: 600; }
+    .time-window-fields { display: flex; align-items: end; gap: 14px; flex-wrap: wrap; }
+    .time-window-field { min-width: 210px; }
+    .time-window-field .form-label { margin-bottom: 6px; }
+    .time-window-remove { padding: 6px 10px; font-size: 11px; }
 
     .save-bar {
       position: sticky; bottom: 0; z-index: 50;
@@ -600,17 +606,10 @@
               <div class="form-hint">Only accept students from this class and above.</div>
             </div>
             <div class="form-group" style="margin-bottom:0">
-              <label class="form-label">Earliest Start Time</label>
-              <div class="time-row">
-                <input type="number" id="cfg-time-hour" min="1" max="12" placeholder="5" style="width:70px;" />
-                <span>:</span>
-                <input type="number" id="cfg-time-min" min="0" max="59" placeholder="30" style="width:70px;" />
-                <select id="cfg-time-period" style="width:80px;">
-                  <option value="am">AM</option>
-                  <option value="pm" selected>PM</option>
-                </select>
-              </div>
-              <div class="form-hint">Only accept vacancies starting at or after this time.</div>
+              <label class="form-label">Available Time Windows</label>
+              <div id="time-windows"></div>
+              <button type="button" class="btn btn-ghost" onclick="addTimeWindow()">+ Add Time Window</button>
+              <div class="form-hint">A vacancy must fit fully inside one window. An end time earlier than its start means the window continues into the next day.</div>
             </div>
           </div>
         </div>
@@ -803,6 +802,116 @@
     }
 
     // ── Config ────────────────────────────────────────────────────────────────
+    let nextTimeWindowId = 0;
+
+    function setTimeInputs(prefix, totalMinutes) {
+      const h24 = Math.floor(totalMinutes / 60);
+      const minute = totalMinutes % 60;
+      document.getElementById(`${prefix}-hour`).value = (h24 % 12) || 12;
+      document.getElementById(`${prefix}-min`).value = minute;
+      document.getElementById(`${prefix}-period`).value = h24 >= 12 ? 'pm' : 'am';
+    }
+
+    function readTimeMinutes(prefix) {
+      const hour = Number(document.getElementById(`${prefix}-hour`).value);
+      const minute = Number(document.getElementById(`${prefix}-min`).value);
+      const period = document.getElementById(`${prefix}-period`).value;
+      if (!Number.isInteger(hour) || hour < 1 || hour > 12 || !Number.isInteger(minute) || minute < 0 || minute > 59) {
+        throw new Error('Enter a valid start and end time.');
+      }
+      const h24 = (hour % 12) + (period === 'pm' ? 12 : 0);
+      return h24 * 60 + minute;
+    }
+
+    function formatTimeMinutes(totalMinutes) {
+      const h24 = Math.floor(totalMinutes / 60) % 24;
+      const minute = totalMinutes % 60;
+      const hour = (h24 % 12) || 12;
+      return `${hour}:${String(minute).padStart(2, '0')} ${h24 >= 12 ? 'PM' : 'AM'}`;
+    }
+
+    function getConfigTimeWindows(c) {
+      const windows = Array.isArray(c.TIME_WINDOWS)
+        ? c.TIME_WINDOWS
+        : [{
+            START_MINUTES: c.EARLIEST_START_MINUTES ?? (19*60),
+            END_MINUTES: c.LATEST_END_MINUTES ?? (22*60),
+          }];
+      return windows
+        .filter(w => Number.isFinite(w?.START_MINUTES) && Number.isFinite(w?.END_MINUTES) && w.START_MINUTES >= 0 && w.START_MINUTES < 24*60 && w.END_MINUTES >= 0 && w.END_MINUTES < 24*60 && w.START_MINUTES !== w.END_MINUTES)
+        .map(w => ({ startMinutes: w.START_MINUTES, endMinutes: w.END_MINUTES }));
+    }
+
+    function renderTimeWindows(windows) {
+      document.getElementById('time-windows').innerHTML = '';
+      nextTimeWindowId = 0;
+      windows.forEach(w => addTimeWindow(w.startMinutes, w.endMinutes));
+    }
+
+    function addTimeWindow(startMinutes = 19*60, endMinutes = 22*60) {
+      const id = nextTimeWindowId++;
+      const startPrefix = `cfg-window-${id}-start`;
+      const endPrefix = `cfg-window-${id}-end`;
+      const row = document.createElement('div');
+      row.className = 'time-window-row';
+      row.dataset.startPrefix = startPrefix;
+      row.dataset.endPrefix = endPrefix;
+      row.innerHTML = `
+        <div class="time-window-heading">
+          <span class="time-window-title"></span>
+          <button type="button" class="btn btn-ghost time-window-remove" onclick="removeTimeWindow(this)">Remove</button>
+        </div>
+        <div class="time-window-fields">
+          <div class="time-window-field">
+            <label class="form-label">Start Time</label>
+            <div class="time-row">
+              <input type="number" id="${startPrefix}-hour" min="1" max="12" style="width:70px;" />
+              <span>:</span>
+              <input type="number" id="${startPrefix}-min" min="0" max="59" style="width:70px;" />
+              <select id="${startPrefix}-period" style="width:80px;"><option value="am">AM</option><option value="pm">PM</option></select>
+            </div>
+          </div>
+          <div class="time-window-field">
+            <label class="form-label">End Time</label>
+            <div class="time-row">
+              <input type="number" id="${endPrefix}-hour" min="1" max="12" style="width:70px;" />
+              <span>:</span>
+              <input type="number" id="${endPrefix}-min" min="0" max="59" style="width:70px;" />
+              <select id="${endPrefix}-period" style="width:80px;"><option value="am">AM</option><option value="pm">PM</option></select>
+            </div>
+          </div>
+        </div>`;
+      document.getElementById('time-windows').appendChild(row);
+      setTimeInputs(startPrefix, startMinutes);
+      setTimeInputs(endPrefix, endMinutes);
+      renumberTimeWindowLabels();
+    }
+
+    function removeTimeWindow(button) {
+      button.closest('.time-window-row').remove();
+      renumberTimeWindowLabels();
+    }
+
+    function renumberTimeWindowLabels() {
+      document.querySelectorAll('#time-windows .time-window-row').forEach((row, index) => {
+        row.querySelector('.time-window-title').textContent = `Time Window ${index + 1}`;
+      });
+    }
+
+    function readTimeWindows() {
+      const rows = [...document.querySelectorAll('#time-windows .time-window-row')];
+      if (!rows.length) throw new Error('Add at least one time window.');
+
+      return rows.map((row, index) => {
+        const startMinutes = readTimeMinutes(row.dataset.startPrefix);
+        const endMinutes = readTimeMinutes(row.dataset.endPrefix);
+        if (endMinutes === startMinutes) {
+          throw new Error(`Start and end times cannot be the same in Time Window ${index + 1}.`);
+        }
+        return { START_MINUTES: startMinutes, END_MINUTES: endMinutes };
+      });
+    }
+
     async function loadConfig() {
       try {
         const res = await fetch('/api/config');
@@ -818,12 +927,7 @@
         const subjects = c.SUBJECTS || ['english'];
         document.querySelectorAll('.subject-pill').forEach(p => p.classList.toggle('active', subjects.includes(p.dataset.value)));
         document.getElementById('cfg-min-class').value = c.MINIMUM_CLASS || 8;
-        const mins = c.EARLIEST_START_MINUTES ?? (19*60);
-        let h = Math.floor(mins/60), min = mins%60, per = h >= 12 ? 'pm' : 'am';
-        if (h > 12) h -= 12; if (h === 0) h = 12;
-        document.getElementById('cfg-time-hour').value = h;
-        document.getElementById('cfg-time-min').value = min;
-        document.getElementById('cfg-time-period').value = per;
+        renderTimeWindows(getConfigTimeWindows(c));
         const availDays = c.AVAILABLE_DAYS || ['Monday','Tuesday','Wednesday','Thursday','Friday'];
         document.querySelectorAll('.day-pill').forEach(p => p.classList.toggle('active', availDays.includes(p.dataset.value)));
         document.getElementById('ov-groups').textContent = (c.GROUP_IDS||[]).length;
@@ -833,12 +937,7 @@
     }
 
     function buildConfig() {
-      const hv = parseInt(document.getElementById('cfg-time-hour').value)||5;
-      const mv = parseInt(document.getElementById('cfg-time-min').value)||30;
-      const per = document.getElementById('cfg-time-period').value;
-      let h24 = hv;
-      if (per === 'pm' && hv !== 12) h24 += 12;
-      if (per === 'am' && hv === 12) h24 = 0;
+      const timeWindows = readTimeWindows();
       return {
         GROUP_IDS: tagData.group,
         REPLY_MODE: document.getElementById('cfg-reply-mode').value,
@@ -850,7 +949,7 @@
         ENABLE_AUTO_REPLY: document.getElementById('cfg-auto-reply').checked,
         SUBJECTS: [...document.querySelectorAll('.subject-pill.active')].map(p => p.dataset.value),
         MINIMUM_CLASS: parseInt(document.getElementById('cfg-min-class').value)||8,
-        EARLIEST_START_MINUTES: h24*60 + mv,
+        TIME_WINDOWS: timeWindows,
         AVAILABLE_DAYS: [...document.querySelectorAll('.day-pill.active')].map(p => p.dataset.value),
       };
     }
@@ -875,12 +974,16 @@
 
     function updateConfigSummary(c) {
       const modeMap = {dm:'Private DM', group:'Group Reply', both:'DM + Group'};
+      const timeWindows = getConfigTimeWindows(c)
+        .map(w => `${formatTimeMinutes(w.startMinutes)}–${formatTimeMinutes(w.endMinutes)}${w.endMinutes < w.startMinutes ? ' (next day)' : ''}`)
+        .join(', ') || 'None';
       document.getElementById('config-summary').innerHTML = `
         <div><span style="color:var(--text-muted)">Groups:</span> <strong style="color:var(--text)">${(c.GROUP_IDS||[]).length} group(s)</strong></div>
         <div><span style="color:var(--text-muted)">Reply mode:</span> <strong style="color:var(--text)">${modeMap[c.REPLY_MODE]||c.REPLY_MODE}</strong></div>
         <div><span style="color:var(--text-muted)">Auto reply:</span> <strong style="color:${c.ENABLE_AUTO_REPLY?'var(--green)':'var(--red)'}">${c.ENABLE_AUTO_REPLY?'Enabled':'Disabled (Dry Run)'}</strong></div>
         <div><span style="color:var(--text-muted)">Keyword filter:</span> <strong style="color:var(--text)">${c.USE_KEYWORD_FILTER?'On':'Off'}</strong></div>
-        <div><span style="color:var(--text-muted)">Notify self:</span> <strong style="color:var(--text)">${c.NOTIFY_SELF?'Yes':'No'}</strong></div>`;
+        <div><span style="color:var(--text-muted)">Notify self:</span> <strong style="color:var(--text)">${c.NOTIFY_SELF?'Yes':'No'}</strong></div>
+        <div><span style="color:var(--text-muted)">Class time windows:</span> <strong style="color:var(--text)">${timeWindows}</strong></div>`;
     }
 
     // ── Tag inputs ────────────────────────────────────────────────────────────
