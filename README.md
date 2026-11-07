@@ -17,8 +17,8 @@ WhatsApp Group Message
     Match found
         │
         ▼
-  Parse Message Fields
-  (Student, Class, Subject, Time, Days)
+  Regex Parse -> AI Fallback if Needed
+  (Student, Class, Subject, Sessions, Time, Days)
         │
         ▼
   Match Against Your Preferences
@@ -36,8 +36,8 @@ WhatsApp Group Message
 
 1. The bot watches the WhatsApp groups you configured.
 2. Every incoming message is checked against a **keyword filter** (e.g. "tuition", "student", "required").
-3. Matching messages are **parsed** to extract: student name, class, subject, time, and days.
-4. The parsed data is compared against **your preferences** (subject, class time window, minimum grade, available days).
+3. Matching messages are parsed by the existing regex parser. If required fields are missing or the format is ambiguous, an optional AI fallback may extract them.
+4. The extracted data is compared against **your preferences** (subject, class time window, minimum grade, available days).
 5. If everything matches, the bot automatically **sends a reply** (DM to the poster, group message, or both).
 6. You can optionally receive a **self-notification** with the matched vacancy details.
 
@@ -48,6 +48,7 @@ WhatsApp Group Message
 ```
 tuition-bot-v2/
 ├── index.js          # Main bot — WhatsApp client + message processing logic
+├── aiParser.js       # Optional Groq structured extraction fallback
 ├── server.js         # Express + WebSocket dashboard server (port 3000)
 ├── botState.js       # Shared state bridge between bot and dashboard
 ├── config.js         # Your settings (auto-managed by the dashboard)
@@ -89,6 +90,14 @@ npm run groups
 
 ### 4. Configure the bot
 Either edit `config.js` directly, **or** use the web dashboard (recommended — see below).
+
+### Optional AI parsing fallback
+
+Set `GROQ_API_KEY` in `.env` to enable the fallback. `GROQ_MODEL` defaults to `openai/gpt-oss-20b`, and `GROQ_TIMEOUT_MS` defaults to `8000`. If you change the model, choose one that supports Groq strict JSON-schema output. Leave the API key blank to use regex parsing only.
+
+The bot calls Groq only after the keyword filter and only when regex parsing misses required matching fields, finds conflicting/ambiguous fields, or fails to parse an explicitly labeled student, course, or sessions value. For those fallback cases, it passes the current `SUBJECTS`, `MINIMUM_CLASS`, `TIME_WINDOWS`, and `AVAILABLE_DAYS` preferences to Groq and asks for both extracted fields and a match decision with a reason. Posts with multiple day/time pairs are represented as separate schedule slots, and every required slot must fit the configured preferences. A negative AI decision blocks the reply; a positive decision must also pass the existing local preference matcher. Missing or ambiguous required information is rejected. Student, course, and session fields are optional for matching, so their absence alone does not trigger an API call.
+
+When fallback is needed, the WhatsApp message text and the current matching preferences are sent to Groq's Chat Completions API with a fixed extraction instruction and strict response schema. The API key is read from the environment and is never stored in `config.js`.
 
 ---
 

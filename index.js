@@ -6,6 +6,7 @@ const { pushLog, setStatus, setQr, setInfo } = require('./botState');
 
 // Start the dashboard web server alongside the bot
 require('./server');
+const { parseVacancyWithAI } = require('./aiParser');
 
 // ==================================================
 // 1. CONFIGURATION
@@ -170,13 +171,10 @@ client.on("disconnected", (r) => {
 
 client.on("ready", () => {
   console.log("Bot ready. Watching", groups.size, "group(s).");
-  console.log("Subject preference:", preferences.subjects);
-  console.log("Available from: 5:30 PM onwards");
   setStatus('ready');
   setInfo(client.info);
   pushLog('success', `Bot ready — watching ${groups.size} group(s)`);
   pushLog('info', `Subject filter: ${preferences.subjects.join(', ')}`);
-  pushLog('info', 'Available from 5:30 PM onwards');
 });
 
 // ==================================================
@@ -331,7 +329,6 @@ function extractDays(daysText) {
   const rangeMatch = text.match(
     /\b(mon|monday|mndy|tue|tues|tuesday|wed|wednesday|thu|thur|thursday|fri|friday|sat|saturday|sun|sunday)\b\s*(?:to|through|until|-|–)\s*\b(mon|monday|mndy|tue|tues|tuesday|wed|wednesday|thu|thur|thursday|fri|friday|sat|saturday|sun|sunday)\b/i,
   );
-
   if (rangeMatch) {
     const start = WEEKDAYS.indexOf(DAY_ALIASES[rangeMatch[1].toLowerCase()]);
 
@@ -367,7 +364,169 @@ function parseRequirement(text) {
     days: extractDays(fields.days),
     startTimeMinutes: timeRange?.startTimeMinutes ?? null,
     endTimeMinutes: timeRange?.endTimeMinutes ?? null,
+    scheduleSlots: [],
   };
+}
+
+function getMissingMatchFields(requirement) {
+  const missing = [];
+  if (!requirement?.class || extractGrade(requirement.class) === null) missing.push("class");
+  if (!requirement?.subject) missing.push("subject");
+  if (!Array.isArray(requirement?.days) || requirement.days.length === 0) missing.push("days");
+  const hasValidScheduleSlots =
+    Array.isArray(requirement?.scheduleSlots) &&
+    requirement.scheduleSlots.length > 0 &&
+    requirement.scheduleSlots.every((slot) =>
+      Number.isInteger(slot.startTimeMinutes) &&
+      Number.isInteger(slot.endTimeMinutes) &&
+      slot.endTimeMinutes > slot.startTimeMinutes,
+    );
+  if (!hasValidScheduleSlots && (
+    !Number.isInteger(requirement?.startTimeMinutes) ||
+    !Number.isInteger(requirement?.endTimeMinutes) ||
+    requirement.endTimeMinutes <= requirement.startTimeMinutes
+  )) {
+    missing.push("time range");
+  }
+  return missing;
+}
+
+function getMissingLabeledOptionalFields(text, requirement) {
+  const labeledFields = extractFields(text);
+  const missing = [];
+  for (const field of ["student", "course", "sessions"]) {
+    if (
+      Object.prototype.hasOwnProperty.call(labeledFields, field) &&
+      (requirement?.[field] === null || requirement?.[field] === undefined || requirement?.[field] === "")
+    ) {
+      missing.push(field);
+    }
+  }
+  return missing;
+}
+
+function countTimeRanges(text) {
+  const rangePattern =
+    /\d{1,2}(?:[:.]\d{1,2})?\s*(?:a\.?\s*m\.?|p\.?\s*m\.?)?\s*(?:-|\u2013|\u2014|\bto\b)\s*\d{1,2}(?:[:.]\d{1,2})?\s*(?:a\.?\s*m\.?|p\.?\s*m\.?)?/gi;
+  return normalizeMessage(text).match(rangePattern)?.length || 0;
+}
+
+function findAmbiguousRegexFields(text) {
+  const aliases = {
+    student: "student", name: "student", class: "class", grade: "class",
+    course: "course", subject: "subject", session: "sessions", sessions: "sessions",
+    time: "time", timing: "time", day: "days", days: "days",
+  };
+  const labelPattern = /^\s*(STUDENT|NAME|CLASS|GRADE|COURSE|SUBJECT|SESSIONS?|TIME|TIMING|DAYS?)\s*[:\uFF1A-]\s*(.*?)\s*$/i;
+  const valuesByField = new Map();
+
+  for (const line of normalizeMessage(text).split("\n")) {
+    const match = line.match(labelPattern);
+    if (!match) continue;
+    const field = aliases[match[1].toLowerCase()];
+    const values = valuesByField.get(field) || new Set();
+    values.add(match[2].trim().toLowerCase().replace(/\s+/g, " "));
+    valuesByField.set(field, values);
+  }
+
+  const ambiguous = [...valuesByField.entries()]
+    .filter(([, values]) => values.size > 1)
+    .map(([field]) => field);
+  return ambiguous;
+}
+
+function parsedValuesMatch(field, regexValue, aiValue) {
+  if (field === "class") {
+    const regexGrade = extractGrade(regexValue);
+    const aiGrade = extractGrade(aiValue);
+    if (regexGrade !== null && aiGrade !== null) return regexGrade === aiGrade;
+  }
+  if (field === "days") {
+    const normalizeDays = (days) => [...days].map((day) => day.toLowerCase()).sort();
+    return JSON.stringify(normalizeDays(regexValue)) === JSON.stringify(normalizeDays(aiValue));
+  }
+  if (field === "subject") {
+    return String(regexValue).trim().toLowerCase() === String(aiValue).trim().toLowerCase();
+  }
+  return String(regexValue).trim().toLowerCase() === String(aiValue).trim().toLowerCase();
+}
+
+function mergeRegexAndAI(regexRequirement, aiRequirement) {
+  const merged = { ...regexRequirement };
+  const conflicts = [];
+  const criticalFields = new Set(["class", "subject"]);
+
+  for (const field of ["student", "class", "course", "subject", "sessions"]) {
+    const regexValue = regexRequirement[field];
+    const aiValue = aiRequirement[field];
+    const regexClassIsUnusable = field === "class" && extractGrade(regexValue) === null;
+
+    if (regexValue === null || regexValue === undefined || regexValue === "" || regexClassIsUnusable) {
+      merged[field] = aiValue;
+    } else if (aiValue !== null && aiValue !== undefined && !parsedValuesMatch(field, regexValue, aiValue)) {
+      if (criticalFields.has(field)) conflicts.push(field);
+    }
+  }
+
+  const regexHasTime =
+    Number.isInteger(regexRequirement.startTimeMinutes) &&
+    Number.isInteger(regexRequirement.endTimeMinutes) &&
+    regexRequirement.endTimeMinutes > regexRequirement.startTimeMinutes;
+
+  const aiScheduleSlots = Array.isArray(aiRequirement.scheduleSlots)
+    ? aiRequirement.scheduleSlots
+    : [];
+
+  if (aiScheduleSlots.length) {
+    const regexDays = Array.isArray(regexRequirement.days) ? regexRequirement.days : [];
+    if (regexDays.some((day) => !aiRequirement.days.includes(day))) {
+      conflicts.push("days");
+    }
+    merged.days = aiRequirement.days;
+
+    const regexTimeMatchesAI = !regexHasTime || (regexDays.length
+      ? regexDays.every((day) =>
+          aiScheduleSlots.some((slot) =>
+            slot.day === day &&
+            slot.startTimeMinutes === regexRequirement.startTimeMinutes &&
+            slot.endTimeMinutes === regexRequirement.endTimeMinutes,
+          ),
+        )
+      : aiScheduleSlots.some((slot) =>
+          slot.startTimeMinutes === regexRequirement.startTimeMinutes &&
+          slot.endTimeMinutes === regexRequirement.endTimeMinutes,
+        ));
+    if (!regexTimeMatchesAI) {
+      conflicts.push("time range");
+    }
+
+    merged.scheduleSlots = aiScheduleSlots;
+    merged.startTimeMinutes = aiScheduleSlots.length === 1
+      ? aiScheduleSlots[0].startTimeMinutes
+      : null;
+    merged.endTimeMinutes = aiScheduleSlots.length === 1
+      ? aiScheduleSlots[0].endTimeMinutes
+      : null;
+  } else {
+    if (!Array.isArray(regexRequirement.days) || regexRequirement.days.length === 0) {
+      merged.days = aiRequirement.days;
+    } else if (!parsedValuesMatch("days", regexRequirement.days, aiRequirement.days)) {
+      conflicts.push("days");
+    }
+
+    merged.scheduleSlots = [];
+    if (!regexHasTime) {
+      merged.startTimeMinutes = aiRequirement.startTimeMinutes;
+      merged.endTimeMinutes = aiRequirement.endTimeMinutes;
+    } else if (
+      regexRequirement.startTimeMinutes !== aiRequirement.startTimeMinutes ||
+      regexRequirement.endTimeMinutes !== aiRequirement.endTimeMinutes
+    ) {
+      conflicts.push("time range");
+    }
+  }
+
+  return { requirement: merged, conflicts: [...new Set(conflicts)] };
 }
 
 //extract remark or comments
@@ -390,8 +549,13 @@ function extractGrade(classText) {
 // ==================================================
 // 9. MATCH YOUR PREFERENCES
 // ==================================================
-function matchesPreferences(requirement, originalText) {
-  const preferences = loadPreferences();
+function matchesPreferences(
+  requirement,
+  originalText,
+  parseBlockReason = null,
+  preferenceSnapshot = null,
+) {
+  const preferences = preferenceSnapshot || loadPreferences();
 
   // Rule 1: Reject the excluded communication requirement.
   if (hasExcludedRequirement(originalText)) {
@@ -399,6 +563,10 @@ function matchesPreferences(requirement, originalText) {
       matched: false,
       reason: "Requires 100% English Communication",
     };
+  }
+
+  if (parseBlockReason) {
+    return { matched: false, reason: parseBlockReason };
   }
 
   // Rule 2: The subject must be configured.
@@ -416,25 +584,44 @@ function matchesPreferences(requirement, originalText) {
     };
   }
 
-  // Rule 3: The full class time must fit inside one configured time window.
-  if (requirement.startTimeMinutes === null || requirement.endTimeMinutes === null) {
-    return {
-      matched: false,
-      reason: "Time missing or ambiguous",
-    };
-  }
+  // Rule 3: Every required class slot must fit inside a configured time window.
+  const scheduleSlots = Array.isArray(requirement.scheduleSlots)
+    ? requirement.scheduleSlots
+    : [];
+  if (scheduleSlots.length) {
+    const outsideWindow = scheduleSlots.find((slot) =>
+      !preferences.timeWindows.some(
+        (window) =>
+          slot.startTimeMinutes >= window.startMinutes &&
+          slot.endTimeMinutes <= window.endMinutes,
+      ),
+    );
+    if (outsideWindow) {
+      return {
+        matched: false,
+        reason: `Class time on ${outsideWindow.day} is outside configured time windows`,
+      };
+    }
+  } else {
+    if (requirement.startTimeMinutes === null || requirement.endTimeMinutes === null) {
+      return {
+        matched: false,
+        reason: "Time missing or ambiguous",
+      };
+    }
 
-  const fitsTimeWindow = preferences.timeWindows.some(
-    (window) =>
-      requirement.startTimeMinutes >= window.startMinutes &&
-      requirement.endTimeMinutes <= window.endMinutes,
-  );
+    const fitsTimeWindow = preferences.timeWindows.some(
+      (window) =>
+        requirement.startTimeMinutes >= window.startMinutes &&
+        requirement.endTimeMinutes <= window.endMinutes,
+    );
 
-  if (!fitsTimeWindow) {
-    return {
-      matched: false,
-      reason: "Class time is outside configured time windows",
-    };
+    if (!fitsTimeWindow) {
+      return {
+        matched: false,
+        reason: "Class time is outside configured time windows",
+      };
+    }
   }
 
   // Rule 4: The class must be on configured available days.
@@ -573,6 +760,8 @@ async function sendReplies(msg, requirement) {
 // 13. PROCESS EACH INCOMING MESSAGE
 // ==================================================
 
+let missingAiKeyWarningLogged = false;
+
 async function processMessage(msg) {
   if (msg.fromMe) return;
   if (!groups.has(msg.from)) return;
@@ -581,27 +770,115 @@ async function processMessage(msg) {
   const id = idOf(msg.id);
 
   if (hasSeenMessage(id)) {
-    console.log("Duplicate message ignored:", id);
     return;
   }
 
   const text = normalizeMessage(msg.body);
- 
-
   if (!text) return;
 
   if (!passesKeywordFilter(text)) {
-    console.log("Skipped: keyword filter");
     pushLog('info', 'Message skipped: keyword filter');
     return;
   }
 
-  const requirement = parseRequirement(text);
- 
-result = matchesPreferences(requirement, text);
+  // Use one preference snapshot for the AI assessment and the local safety check.
+  const preferenceSnapshot = loadPreferences();
 
-  console.log("\nIncoming tuition broadcast:");
-  console.log(JSON.stringify(requirement, null, 2));
+  let requirement;
+  try {
+    requirement = parseRequirement(text);
+  } catch (error) {
+    console.warn("Regex parser failed:", error.message);
+    pushLog('error', 'Regex parser failed; trying AI fallback.');
+    requirement = {
+      student: null,
+      class: null,
+      course: null,
+      subject: null,
+      sessions: null,
+      days: [],
+      startTimeMinutes: null,
+      endTimeMinutes: null,
+      scheduleSlots: [],
+    };
+  }
+
+  const missingFields = [
+    ...new Set([
+      ...getMissingMatchFields(requirement),
+      ...getMissingLabeledOptionalFields(text, requirement),
+    ]),
+  ];
+  const ambiguousFields = findAmbiguousRegexFields(text);
+  const timeRangeCount = countTimeRanges(text);
+  const hasMultipleScheduleRanges = timeRangeCount > 1;
+  let parseBlockReason = null;
+
+  if (missingFields.length || ambiguousFields.length || hasMultipleScheduleRanges) {
+    const fallbackReasons = [
+      ...missingFields,
+      ...ambiguousFields.map((field) => `ambiguous ${field}`),
+      ...(hasMultipleScheduleRanges ? ["multiple schedule slots"] : []),
+    ];
+    pushLog(
+      'info',
+      `Regex extraction needs fallback (${fallbackReasons.join(', ') || 'parser error'}).`,
+    );
+
+    const aiResult = await parseVacancyWithAI(text, preferenceSnapshot);
+    if (aiResult.ok) {
+      const merged = mergeRegexAndAI(requirement, aiResult.data);
+      const unresolvedAmbiguities = ambiguousFields.filter(
+        (field) => !(field === "time" && aiResult.data.scheduleSlots?.length > 1),
+      );
+      if (
+        hasMultipleScheduleRanges &&
+        aiResult.data.scheduleSlots.length < timeRangeCount
+      ) {
+        parseBlockReason = "AI did not extract every schedule slot";
+        console.warn(parseBlockReason);
+        pushLog('error', `${parseBlockReason}; message will not be auto-replied.`);
+      } else if (unresolvedAmbiguities.length) {
+        parseBlockReason = `Ambiguous message fields: ${unresolvedAmbiguities.join(', ')}`;
+      } else if (merged.conflicts.length) {
+        parseBlockReason = `Regex and AI disagree on: ${merged.conflicts.join(', ')}`;
+      } else {
+        requirement = merged.requirement;
+        const stillMissing = getMissingMatchFields(requirement);
+        if (stillMissing.length) {
+          parseBlockReason = `Required fields remain unclear: ${stillMissing.join(', ')}`;
+        } else if (!aiResult.data.matchesPreferences) {
+          parseBlockReason = `AI judged vacancy outside configured preferences: ${aiResult.data.matchReason}`;
+        } else {
+          pushLog('info', `AI assessment matched configured preferences: ${aiResult.data.matchReason}; applying local checks.`);
+        }
+      }
+    } else if (ambiguousFields.length) {
+      parseBlockReason = `Ambiguous message fields: ${ambiguousFields.join(', ')}`;
+      console.warn(`AI fallback could not safely resolve ambiguous fields: ${aiResult.reason}`);
+      pushLog('error', `AI fallback did not resolve ambiguity: ${aiResult.reason}`);
+    } else if (hasMultipleScheduleRanges) {
+      parseBlockReason = `Could not safely parse multiple schedule slots: ${aiResult.reason}`;
+      console.warn(parseBlockReason);
+      pushLog('error', `${parseBlockReason}; message will not be auto-replied.`);
+    } else if (/ambiguous/i.test(aiResult.reason || "")) {
+      parseBlockReason = 'AI fallback could not confidently resolve required information';
+      console.warn(`AI fallback found ambiguous required information: ${aiResult.reason}`);
+      pushLog('error', `AI fallback found ambiguous required information: ${aiResult.reason}; message will not be auto-replied.`);
+    } else if (aiResult.skipped && aiResult.reason === "GROQ_API_KEY is not configured") {
+      if (!missingAiKeyWarningLogged) {
+        console.warn("AI fallback is disabled; set GROQ_API_KEY to enable it.");
+        pushLog('info', 'AI fallback disabled: GROQ_API_KEY is not configured.');
+        missingAiKeyWarningLogged = true;
+      }
+    } else {
+      console.warn(`AI fallback unavailable: ${aiResult.reason}`);
+      pushLog('error', `AI fallback unavailable: ${aiResult.reason}`);
+    }
+  }
+
+  const result = matchesPreferences(requirement, text, parseBlockReason, preferenceSnapshot);
+
   console.log("Decision:", result.reason);
   pushLog(result.matched ? 'success' : 'info', `Decision: ${result.reason}`);
 
@@ -618,8 +895,7 @@ result = matchesPreferences(requirement, text);
 
   console.log(
     new Date().toLocaleTimeString(),
-    "Processed matching message from",
-    msg.author,
+    "Processed matching vacancy.",
   );
 }
 
